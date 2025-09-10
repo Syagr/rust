@@ -1,0 +1,12 @@
+Assignment 1: Basic theory
+
+1. Rust supports both single-threaded and multi-threaded programming. It can be synchronous or asynchronous, depending on how you write your code.
+2. Rust does not have a built-in runtime and does not use a garbage collector; memory is managed through ownership and borrowing.
+3. Static typing means variable types are known at compile time. This helps catch errors early and improves code reliability and performance.
+4. Immutability means variables cannot be changed after they are set. It helps prevent bugs and makes code safer and easier to reason about.
+5. Move semantics transfer ownership of data, while borrowing allows references without transferring ownership. These rules prevent data races and memory errors.
+6. Traits define shared behavior (like interfaces in other languages) and are used to specify what methods a type must implement.
+7. Lifetimes ensure references are valid as long as needed, preventing dangling references and memory safety issues.
+8. Macros generate code at compile time, reducing repetition and enabling metaprogramming.
+9. &String is a reference to a String object, while &str is a reference to a string slice; similarly, &Vec is a reference to a vector, &[u8] is a slice of bytes. Fat pointers store extra metadata (like length), while thin pointers do not.
+10. Static dispatch determines method calls at compile time (faster), while dynamic dispatch uses runtime lookup (more flexible, but slower).
