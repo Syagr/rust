@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target/
+
+# Ignore debug/release build outputs just in case
+**/target/
+**/target/*
+
+# Editor temp files
+*.rs.bk
+*.swp
+*.tmp
+
+# OS files
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs and binaries
+*.log
+*.exe
+*.dll
+*.pdb
+
+# If snippets-app was created as an independent repo, ignore its internal .git
+part_1-2/snippets-app/.git
+part_1-2/snippets-app/.git.bak
