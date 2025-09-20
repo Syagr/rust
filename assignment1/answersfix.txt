@@ -1,7 +1,7 @@
 Assignment 1: Basic theory
 
 1. Rust supports both single-threaded and multi-threaded programming. It can be synchronous or asynchronous, depending on how you write your code.
-2. Rust does not have a built-in runtime and does not use a garbage collector; memory is managed through ownership and borrowing.
+2. Rust has a minimal runtime (not a full-featured one) and does not use a garbage collector; memory is managed through ownership and borrowing.
 3. Static typing means variable types are known at compile time. This helps catch errors early and improves code reliability and performance.
 4. Immutability means variables cannot be changed after they are set. It helps prevent bugs and makes code safer and easier to reason about.
 5. Move semantics transfer ownership of data, while borrowing allows references without transferring ownership. These rules prevent data races and memory errors.
