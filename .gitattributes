@@ -1,2 +1,20 @@
+# Normalize line endings - let Git handle text files
+* text=auto
+
+# Force LF for source files and configs to keep consistency across platforms
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+Cargo.lock text eol=lf
+
+# Binary files (do not treat as text)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
 # Auto detect text files and perform LF normalization
 * text=auto
