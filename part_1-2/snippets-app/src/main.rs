@@ -1,5 +1,25 @@
-use clap::Parser;
+//! snippets-app — a tiny CLI to save, read and delete code snippets.
+//!
+//! This binary demonstrates two storage backends (JSON file and SQLite),
+//! simple configuration through the `SNIPPETS_APP_STORAGE` environment
+//! variable and a small set of integration tests.
+//!
+//! The crate enables several lints to keep documentation and public API
+//! visibility strict for learning purposes.
+#![warn(
+    missing_docs,
+    broken_intra_doc_links,
+    missing_crate_level_docs,
+    unreachable_pub
+)]
+#![warn(
+    clippy::missing_panics_doc,
+    clippy::clone_on_ref_ptr,
+    clippy::similar_names
+)]
+
 use chrono::{DateTime, Utc};
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -23,10 +43,11 @@ enum AppError {
     #[error("Snippet not found")]
     NotFound,
 
-    #[error("Invalid storage provider string, expected PROVIDER:PATH")] 
+    #[error("Invalid storage provider string, expected PROVIDER:PATH")]
     InvalidProvider,
 }
 
+/// Application-level error enum for snippets-app.
 type Result<T> = std::result::Result<T, AppError>;
 
 #[derive(Parser)]
@@ -44,6 +65,7 @@ struct Cli {
     download: Option<String>,
 }
 
+/// CLI arguments for the snippets-app binary.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Snippet {
     name: String,
@@ -51,6 +73,7 @@ struct Snippet {
     created_at: DateTime<Utc>,
 }
 
+/// Storage abstraction for snippets. Implementations provide add/get/remove.
 trait SnippetStorage {
     fn add(&mut self, snippet: Snippet) -> Result<()>;
     fn get(&self, name: &str) -> Result<Snippet>;
@@ -62,6 +85,7 @@ struct JsonFileStorage {
     index: HashMap<String, Snippet>,
 }
 
+/// JSON file based storage. Keeps an in-memory index and persists to disk.
 impl JsonFileStorage {
     fn open(path: impl Into<String>) -> Result<Self> {
         let path = path.into();
@@ -101,10 +125,7 @@ impl SnippetStorage for JsonFileStorage {
     }
 
     fn get(&self, name: &str) -> Result<Snippet> {
-        self.index
-            .get(name)
-            .cloned()
-            .ok_or(AppError::NotFound)
+        self.index.get(name).cloned().ok_or(AppError::NotFound)
     }
 
     fn remove(&mut self, name: &str) -> Result<()> {
@@ -121,6 +142,7 @@ struct SqliteStorage {
     conn: rusqlite::Connection,
 }
 
+/// SQLite-based storage using a simple `snippets` table.
 impl SqliteStorage {
     fn open(path: impl AsRef<str>) -> Result<Self> {
         let conn = rusqlite::Connection::open(path.as_ref())?;
@@ -139,7 +161,11 @@ impl SnippetStorage for SqliteStorage {
     fn add(&mut self, snippet: Snippet) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO snippets (name, content, created_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![snippet.name, snippet.content, snippet.created_at.to_rfc3339()],
+            rusqlite::params![
+                snippet.name,
+                snippet.content,
+                snippet.created_at.to_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -155,7 +181,7 @@ impl SnippetStorage for SqliteStorage {
             let created_at_str: String = row.get(2)?;
             let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                 .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
             Ok(Snippet {
                 name,
                 content,
@@ -167,9 +193,10 @@ impl SnippetStorage for SqliteStorage {
     }
 
     fn remove(&mut self, name: &str) -> Result<()> {
-        let n = self
-            .conn
-            .execute("DELETE FROM snippets WHERE name = ?1", rusqlite::params![name])?;
+        let n = self.conn.execute(
+            "DELETE FROM snippets WHERE name = ?1",
+            rusqlite::params![name],
+        )?;
         if n > 0 {
             Ok(())
         } else {
@@ -191,6 +218,11 @@ fn build_storage_from_env() -> Result<Box<dyn SnippetStorage>> {
     }
 }
 
+/// Run the application logic. Returns an `AppError` on failure.
+///
+/// # Errors
+///
+/// Returns an error if storage initialization, IO or network download fails.
 fn run_app() -> Result<()> {
     let cli = Cli::parse();
     // initialize tracing/logging according to env vars
@@ -201,8 +233,12 @@ fn run_app() -> Result<()> {
         let content = if let Some(url) = cli.download {
             // download content
             match reqwest::blocking::get(&url) {
-                Ok(resp) => resp.text().map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?,
-                Err(e) => return Err(AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))),
+                Ok(resp) => resp
+                    .text()
+                    .map_err(|e| AppError::Io(std::io::Error::other(e)))?,
+                Err(e) => {
+                    return Err(AppError::Io(std::io::Error::other(e)))
+                }
             }
         } else {
             let mut s = String::new();
@@ -253,12 +289,17 @@ fn run_app() -> Result<()> {
 }
 
 fn init_tracing_from_env() {
-    use tracing_subscriber::{fmt, EnvFilter};
     use std::sync::Arc;
-    let default_level = std::env::var("SNIPPETS_APP_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+    use tracing_subscriber::{fmt, EnvFilter};
+    let default_level =
+        std::env::var("SNIPPETS_APP_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
     if let Ok(path) = std::env::var("SNIPPETS_APP_LOG_PATH") {
         // try to open file for append; provide a closure that clones the file per writer
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let arc = Arc::new(file);
             let subscriber = fmt()
                 .with_env_filter(EnvFilter::new(default_level))
@@ -268,7 +309,9 @@ fn init_tracing_from_env() {
             return;
         }
     }
-    let subscriber = fmt().with_env_filter(EnvFilter::new(default_level)).finish();
+    let subscriber = fmt()
+        .with_env_filter(EnvFilter::new(default_level))
+        .finish();
     tracing::subscriber::set_global_default(subscriber).ok();
 }
 
@@ -290,7 +333,11 @@ mod tests {
         let path = tmp.path().to_str().unwrap().to_string();
         let mut s = JsonFileStorage::open(path.clone()).expect("open");
 
-        let sn = Snippet { name: "a".into(), content: "c".into(), created_at: Utc::now() };
+        let sn = Snippet {
+            name: "a".into(),
+            content: "c".into(),
+            created_at: Utc::now(),
+        };
         s.add(sn.clone()).expect("add");
         let got = s.get("a").expect("get");
         assert_eq!(got.name, "a");
@@ -305,7 +352,11 @@ mod tests {
         let path = tmp.path().to_str().unwrap().to_string();
         let mut s = SqliteStorage::open(&path).expect("open sqlite");
 
-        let sn = Snippet { name: "x".into(), content: "y".into(), created_at: Utc::now() };
+        let sn = Snippet {
+            name: "x".into(),
+            content: "y".into(),
+            created_at: Utc::now(),
+        };
         s.add(sn.clone()).expect("add");
         let got = s.get("x").expect("get");
         assert_eq!(got.name, "x");
