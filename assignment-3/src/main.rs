@@ -100,10 +100,66 @@ impl UserRepositoryDynamic {
 }
 
 // --- Part 2: snippets app improvements ---
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct Name(pub String);
+
+impl From<String> for Name {
+    fn from(s: String) -> Self {
+        Name(s)
+    }
+}
+
+impl From<&str> for Name {
+    fn from(s: &str) -> Self {
+        Name(s.to_string())
+    }
+}
+
+impl AsRef<str> for Name {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct Content(pub String);
+
+impl From<String> for Content {
+    fn from(s: String) -> Self {
+        Content(s)
+    }
+}
+
+impl From<&str> for Content {
+    fn from(s: &str) -> Self {
+        Content(s.to_string())
+    }
+}
+
+impl AsRef<str> for Content {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Content {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Snippet {
-    name: String,
-    content: String,
+    name: Name,
+    content: Content,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -146,7 +202,7 @@ impl JsonFileStorage {
 
 impl SnippetStorage for JsonFileStorage {
     fn add(&mut self, s: Snippet) {
-        self.index.insert(s.name.clone(), s);
+        self.index.insert(s.name.0.clone(), s);
         self.persist();
     }
 
@@ -186,7 +242,7 @@ impl SnippetStorage for SqliteStorage {
     fn add(&mut self, s: Snippet) {
         let _ = self.conn.execute(
             "INSERT OR REPLACE INTO snippets (name, content, created_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![s.name, s.content, s.created_at.to_rfc3339()],
+            rusqlite::params![s.name.0, s.content.0, s.created_at.to_rfc3339()],
         );
     }
 
@@ -199,7 +255,7 @@ impl SnippetStorage for SqliteStorage {
                 let content: String = row.get(1).ok()?;
                 let created_at_s: String = row.get(2).ok()?;
                 if let Ok(created_at) = chrono::DateTime::parse_from_rfc3339(&created_at_s) {
-                    return Some(Snippet { name, content, created_at: created_at.with_timezone(&chrono::Utc) });
+                    return Some(Snippet { name: Name(name), content: Content(content), created_at: created_at.with_timezone(&chrono::Utc) });
                 }
             }
             Ok(None) => {}
@@ -218,11 +274,21 @@ impl SnippetStorage for SqliteStorage {
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Snippets app with JSON/SQLite storage", long_about = None)]
+/// Command-line options for the snippets application.
+///
+/// Examples:
+///
+/// - Create a snippet from stdin: `--name my-note` and provide content via stdin
+/// - Read a snippet: `--read my-note`
+/// - Delete a snippet: `--delete my-note`
 struct Cli {
+    /// Create a snippet from stdin and save it under this name
     #[arg(long)]
     name: Option<String>,
+    /// Read and print the snippet content for this name
     #[arg(long)]
     read: Option<String>,
+    /// Delete the snippet with this name
     #[arg(long)]
     delete: Option<String>,
 }
@@ -249,7 +315,7 @@ fn main() {
     if let Some(name) = cli.name {
         let mut content = String::new();
         io::stdin().read_to_string(&mut content).unwrap();
-        let sn = Snippet { name: name.clone(), content: content.trim_end().to_string(), created_at: chrono::Utc::now() };
+        let sn = Snippet { name: Name(name.clone()), content: Content(content.trim_end().to_string()), created_at: chrono::Utc::now() };
         storage.add(sn);
         println!("Snippet '{}' saved.", name);
         return;
@@ -319,11 +385,11 @@ mod tests {
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().to_string();
         let mut s = JsonFileStorage::open(path.clone());
-        let sn = Snippet { name: "n1".to_string(), content: "c1".to_string(), created_at: chrono::Utc::now() };
+        let sn = Snippet { name: Name::from("n1"), content: Content::from("c1"), created_at: chrono::Utc::now() };
         s.add(sn.clone());
         let got = s.get("n1").unwrap();
-        assert_eq!(got.name, "n1");
-        assert_eq!(got.content, "c1");
+        assert_eq!(got.name.0, "n1");
+        assert_eq!(got.content.0, "c1");
         assert!(s.remove("n1"));
         assert!(s.get("n1").is_none());
     }
@@ -333,11 +399,11 @@ mod tests {
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().to_string();
         let mut s = SqliteStorage::open(&path).unwrap();
-        let sn = Snippet { name: "n2".to_string(), content: "c2".to_string(), created_at: chrono::Utc::now() };
+        let sn = Snippet { name: Name::from("n2"), content: Content::from("c2"), created_at: chrono::Utc::now() };
         s.add(sn.clone());
         let got = s.get("n2").unwrap();
-        assert_eq!(got.name, "n2");
-        assert_eq!(got.content, "c2");
+        assert_eq!(got.name.0, "n2");
+        assert_eq!(got.content.0, "c2");
         assert!(s.remove("n2"));
         assert!(s.get("n2").is_none());
     }
