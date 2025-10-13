@@ -366,4 +366,56 @@ mod tests {
         assert!(s.get("n2")?.is_none());
         Ok(())
     }
+
+    #[test]
+    fn test_json_open_invalid_json() -> Result<(), AppError> {
+        // create a temp file with invalid JSON
+        let temp = tempfile::NamedTempFile::new().map_err(|e| AppError::Io(e))?;
+        std::fs::write(temp.path(), "{ this is not valid json").map_err(|e| AppError::Io(e))?;
+        // opening should fail with a JSON error
+        match JsonFileStorage::open(temp.path().to_string_lossy().to_string()) {
+            Err(AppError::Json(_)) => Ok(()),
+            Ok(_) => panic!("expected Json error"),
+            Err(e) => panic!("unexpected error: {}", e),
+        }
+    }
+
+    #[test]
+    fn test_json_persist_io_error() -> Result<(), AppError> {
+        // choose a path in a non-existent subdirectory
+        let tempdir = tempfile::tempdir().map_err(|e| AppError::Io(e))?;
+        let path = tempdir.path().join("no_such_dir").join("snippets.json");
+        let path_s = path.to_string_lossy().to_string();
+        // open will succeed (file doesn't exist yet)
+        let mut s = JsonFileStorage::open(path_s.clone())?;
+        let sn = Snippet { name: "x".to_string(), content: "y".to_string(), created_at: chrono::Utc::now() };
+        // adding should attempt to create the file and fail with an IO error because parent dir is missing
+        match s.add(sn) {
+            Err(AppError::Io(_)) => Ok(()),
+            Ok(_) => panic!("expected IO error when persisting to missing dir"),
+            Err(e) => panic!("unexpected error: {}", e),
+        }
+    }
+
+    #[test]
+    fn test_sqlite_parse_error_on_bad_date() -> Result<(), AppError> {
+        // create a sqlite db and insert a row with malformed created_at
+        let temp = tempfile::NamedTempFile::new().map_err(|e| AppError::Io(e))?;
+        let path = temp.path().to_string_lossy().to_string();
+        let conn = rusqlite::Connection::open(&path).map_err(|e| AppError::Sqlite(e))?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS snippets (
+                name TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );",
+        ).map_err(|e| AppError::Sqlite(e))?;
+        conn.execute("INSERT OR REPLACE INTO snippets (name, content, created_at) VALUES (?1, ?2, ?3)", rusqlite::params!["bad", "c", "not-a-date"]).map_err(|e| AppError::Sqlite(e))?;
+        let s = SqliteStorage::open(&path)?;
+        match s.get("bad") {
+            Err(AppError::Parse(_)) => Ok(()),
+            Ok(_) => panic!("expected parse error"),
+            Err(e) => panic!("unexpected error: {}", e),
+        }
+    }
 }
