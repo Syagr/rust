@@ -5,7 +5,7 @@ use url::Url;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use humantime::parse_duration as parse_humantime;
-
+ 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestType {
