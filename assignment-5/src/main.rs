@@ -99,36 +99,34 @@ fn default_watchdog() -> BackgroundWatchdog {
     BackgroundWatchdog { period: default_period(), limit: default_limit(), lock_timeout: default_lock_timeout() }
 }
 
-fn merge_env(conf: &mut config::Config) -> Result<(), config::ConfigError> {
-    // read env variables with CONF_ prefix
-    conf.merge(config::Environment::with_prefix("CONF").separator("__"))?;
-    Ok(())
+fn env_source() -> config::Environment {
+    // read env variables with CONF_ prefix; use double underscore as separator for nesting
+    config::Environment::with_prefix("CONF").separator("__")
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // start with defaults from types by serializing default Conf
-    let mut settings = config::Config::builder()
+    let mut builder = config::Config::builder()
         .set_default("mode.debug", cli.debug)?
         .set_default("server.external_url", default_external_url())?
         .set_default("server.http_port", default_http_port())?
         .set_default("server.grpc_port", default_grpc_port())?
         .set_default("server.healthz_port", default_healthz_port())?
         .set_default("server.metrics_port", default_metrics_port())?
-        .set_default("log.app.level", default_log_level())?
-        .set_default("background.watchdog.period", default_period())?
-        .set_default("background.watchdog.limit", default_limit())?
-        .set_default("background.watchdog.lock_timeout", default_lock_timeout())?
-        .build()?;
+        .set_default("log.level", default_log_level())?
+        .set_default("background.period", default_period())?
+        .set_default("background.limit", default_limit())?
+        .set_default("background.lock_timeout", default_lock_timeout())?;
 
     // merge from file (TOML)
     if cli.conf.exists() {
-        settings.merge(config::File::from(cli.conf.as_path()))?;
+        builder = builder.add_source(config::File::from(cli.conf.as_path()));
     }
 
-    // merge from env CONF_*
-    merge_env(&mut settings)?;
+    // merge from env CONF_* (highest priority)
+    let settings = builder.add_source(env_source()).build()?;
 
     // deserialize into typed struct
     let conf: Conf = settings.try_deserialize()?;
