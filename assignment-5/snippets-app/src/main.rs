@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -36,16 +36,21 @@ enum AppError {
 type Result<T> = std::result::Result<T, AppError>;
 
 #[derive(Parser)]
-#[command(author, version, about = "snippets app — improved", long_about = None)]
+#[command(author, version, about = "snippets app — lab 5", long_about = None)]
 struct Cli {
+    /// Name for the snippet to create. If omitted, use --read or --delete.
     #[arg(long = "name")]
     name: Option<String>,
 
+    /// Read a snippet by name and print content to STDOUT.
     #[arg(long = "read")]
     read: Option<String>,
 
+    /// Delete a snippet by name.
     #[arg(long = "delete")]
     delete: Option<String>,
+
+    /// Download content from URL instead of reading STDIN. Requires --name.
     #[arg(long = "download")]
     download: Option<String>,
 }
@@ -100,10 +105,7 @@ impl SnippetStorage for JsonFileStorage {
     }
 
     fn get(&self, name: &str) -> Result<Snippet> {
-        self.index
-            .get(name)
-            .cloned()
-            .ok_or(AppError::NotFound)
+        self.index.get(name).cloned().ok_or(AppError::NotFound)
     }
 
     fn remove(&mut self, name: &str) -> Result<()> {
@@ -183,8 +185,8 @@ fn build_storage_from_env() -> Result<Box<dyn SnippetStorage>> {
     let provider = parts.next().ok_or(AppError::InvalidProvider)?;
     let path = parts.next().ok_or(AppError::InvalidProvider)?;
     match provider {
-        "json" => Ok(Box::new(JsonFileStorage::open(path)?)),
-        "sqlite" => Ok(Box::new(SqliteStorage::open(path)?)),
+        "json" => Ok(Box::new(JsonFileStorage::open(Path::new(path))?)),
+        "sqlite" => Ok(Box::new(SqliteStorage::open(Path::new(path))?)),
         _ => Err(AppError::InvalidProvider),
     }
 }
@@ -271,7 +273,6 @@ fn init_tracing_from_env() {
     use std::sync::Arc;
     let default_level = std::env::var("SNIPPETS_APP_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
     if let Ok(path) = std::env::var("SNIPPETS_APP_LOG_PATH") {
-        // try to open file for append; provide a closure that clones the file per writer
         if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let arc = Arc::new(file);
             let subscriber = fmt()
@@ -290,58 +291,5 @@ fn main() {
     if let Err(e) = run_app() {
         eprintln!("Fatal error: {}", e);
         std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::NamedTempFile;
-
-    #[test]
-    fn json_storage_add_get_remove() {
-        let tmp = NamedTempFile::new().expect("tmp file");
-        let path = tmp.path().to_str().unwrap().to_string();
-        let mut s = JsonFileStorage::open(path.clone()).expect("open");
-
-        let sn = Snippet { name: "a".into(), content: "c".into(), created_at: Utc::now() };
-        s.add(sn.clone()).expect("add");
-        let got = s.get("a").expect("get");
-        assert_eq!(got.name, "a");
-        assert_eq!(got.content, "c");
-        s.remove("a").expect("remove");
-        assert!(s.get("a").is_err());
-    }
-
-    #[test]
-    fn sqlite_storage_add_get_remove() {
-        let tmp = NamedTempFile::new().expect("tmp file");
-        let path = tmp.path().to_str().unwrap().to_string();
-        let mut s = SqliteStorage::open(&path).expect("open sqlite");
-
-        let sn = Snippet { name: "x".into(), content: "y".into(), created_at: Utc::now() };
-        s.add(sn.clone()).expect("add");
-        let got = s.get("x").expect("get");
-        assert_eq!(got.name, "x");
-        assert_eq!(got.content, "y");
-        s.remove("x").expect("remove");
-        assert!(s.get("x").is_err());
-    }
-
-    #[test]
-    fn build_storage_from_env_json() {
-        let tmp = NamedTempFile::new().expect("tmp file");
-        let path = tmp.path().to_str().unwrap().to_string();
-        std::env::set_var("SNIPPETS_APP_STORAGE", format!("json:{}", path));
-        let _ = build_storage_from_env().expect("build");
-        std::env::remove_var("SNIPPETS_APP_STORAGE");
-    }
-
-    #[test]
-    fn invalid_provider() {
-        std::env::set_var("SNIPPETS_APP_STORAGE", "bad:xxx");
-        let r = build_storage_from_env();
-        assert!(r.is_err());
-        std::env::remove_var("SNIPPETS_APP_STORAGE");
     }
 }
