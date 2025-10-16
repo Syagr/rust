@@ -1,0 +1,11 @@
+[package]
+name = "assignment_8"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+assignment_8_macros = { path = "../assignment-8-macros" }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+trybuild = "1.0"
