@@ -1,9 +1,9 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -42,31 +42,31 @@ pub trait SnippetStorage: Send {
 
 // JSON file backend
 pub struct JsonFileStorage {
-    path: String,
+    path: PathBuf,
     index: HashMap<String, Snippet>,
 }
 
 impl JsonFileStorage {
-    pub fn open(path: impl Into<String>) -> Result<Self, AppError> {
-        let path = path.into();
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, AppError> {
+        let path = path.as_ref().to_owned();
         let mut index = HashMap::new();
-        if Path::new(&path).exists() {
-            let data = fs::read_to_string(&path)?;
-            if !data.trim().is_empty() {
-                index = serde_json::from_str(&data)?;
+        if path.exists() {
+            let meta = fs::metadata(&path)?;
+            if meta.len() > 0 {
+                let file = File::open(&path)?;
+                index = serde_json::from_reader(file)?;
             }
         }
         Ok(Self { path, index })
     }
 
     fn persist(&self) -> Result<(), AppError> {
-        let data = serde_json::to_string_pretty(&self.index)?;
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&self.path)?;
-        file.write_all(data.as_bytes())?;
+        serde_json::to_writer(file, &self.index)?;
         Ok(())
     }
 }
@@ -140,13 +140,43 @@ impl SnippetStorage for SqliteStorage {
     }
 }
 
+/// Command-line interface for snippets-app.
+///
+/// Storage selection:
+/// - Use the `SNIPPETS_APP_STORAGE` env var to choose backend and path.
+/// - Formats:
+///   - `json:<path>`   (e.g., `json:snippets.json`)
+///   - `sqlite:<path>` (e.g., `sqlite:snippets.db`)
+/// - Default: `json:snippets.json` if the env var is unset.
+///
+/// Examples:
+/// - Create: `--name NAME` and provide content via stdin.
+/// - Read: `--read NAME` prints content to stdout.
+/// - Delete: `--delete NAME` removes a snippet.
+///
+/// PowerShell examples:
+/// ```powershell
+/// $env:SNIPPETS_APP_STORAGE = 'sqlite:snippets.db'
+/// 'hello world' | cargo run -- --name demo
+/// cargo run -- --read demo
+/// cargo run -- --delete demo
+/// ```
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Assignment 4 - Snippets app with proper error handling", long_about = None)]
 struct Cli {
+    /// Create or update a snippet with the given name; content is read from stdin.
+    ///
+    /// Tip: you can pipe a file or a string. Trailing newlines are preserved as given.
     #[arg(long)]
     name: Option<String>,
+    /// Read a snippet by name and print its content to stdout.
+    ///
+    /// Returns a non-zero exit code if the snippet is not found.
     #[arg(long)]
     read: Option<String>,
+    /// Delete a snippet by name.
+    ///
+    /// Emits a message if the snippet was not found.
     #[arg(long)]
     delete: Option<String>,
 }
@@ -155,9 +185,9 @@ fn build_storage_from_env() -> Result<Box<dyn SnippetStorage>, AppError> {
     let env = std::env::var("SNIPPETS_APP_STORAGE").unwrap_or_else(|_| "JSON:snippets.json".to_string());
     let parts: Vec<_> = env.splitn(2, ':').collect();
     match parts.as_slice() {
-        ["JSON", path] | ["json", path] => Ok(Box::new(JsonFileStorage::open(path.to_string())?)),
+        ["JSON", path] | ["json", path] => Ok(Box::new(JsonFileStorage::open(path)?)),
         ["SQLITE", path] | ["sqlite", path] => Ok(Box::new(SqliteStorage::open(path)?)),
-        _ => Ok(Box::new(JsonFileStorage::open("snippets.json".to_string())?)),
+        _ => Ok(Box::new(JsonFileStorage::open("snippets.json")?)),
     }
 }
 
@@ -208,9 +238,9 @@ mod tests {
 
     #[test]
     fn test_json_storage_snippet_roundtrip() -> Result<(), AppError> {
-        let temp = tempfile::NamedTempFile::new().map_err(|e| AppError::Io(e))?;
-        let path = temp.path().to_string_lossy().to_string();
-        let mut s = JsonFileStorage::open(path.clone())?;
+    let temp = tempfile::NamedTempFile::new().map_err(|e| AppError::Io(e))?;
+    let path = temp.path().to_path_buf();
+    let mut s = JsonFileStorage::open(&path)?;
         let sn = Snippet { name: "n1".to_string(), content: "c1".to_string(), created_at: chrono::Utc::now() };
         s.add(sn.clone())?;
         let got = s.get("n1")?.unwrap();
@@ -223,9 +253,9 @@ mod tests {
 
     #[test]
     fn test_sqlite_storage_snippet_roundtrip() -> Result<(), AppError> {
-        let temp = tempfile::NamedTempFile::new().map_err(|e| AppError::Io(e))?;
-        let path = temp.path().to_string_lossy().to_string();
-        let mut s = SqliteStorage::open(&path)?;
+    let temp = tempfile::NamedTempFile::new().map_err(|e| AppError::Io(e))?;
+    let path = temp.path().to_path_buf();
+    let mut s = SqliteStorage::open(&path)?;
         let sn = Snippet { name: "n2".to_string(), content: "c2".to_string(), created_at: chrono::Utc::now() };
         s.add(sn.clone())?;
         let got = s.get("n2")?.unwrap();
@@ -240,7 +270,7 @@ mod tests {
     fn test_json_open_invalid_json() -> Result<(), AppError> {
         let temp = tempfile::NamedTempFile::new().map_err(|e| AppError::Io(e))?;
         std::fs::write(temp.path(), "{ this is not valid json").map_err(|e| AppError::Io(e))?;
-        match JsonFileStorage::open(temp.path().to_string_lossy().to_string()) {
+        match JsonFileStorage::open(temp.path()) {
             Err(AppError::Json(_)) => Ok(()),
             Ok(_) => panic!("expected Json error"),
             Err(e) => panic!("unexpected error: {}", e),
@@ -249,10 +279,9 @@ mod tests {
 
     #[test]
     fn test_json_persist_io_error() -> Result<(), AppError> {
-        let tempdir = tempfile::tempdir().map_err(|e| AppError::Io(e))?;
-        let path = tempdir.path().join("no_such_dir").join("snippets.json");
-        let path_s = path.to_string_lossy().to_string();
-        let mut s = JsonFileStorage::open(path_s.clone())?;
+    let tempdir = tempfile::tempdir().map_err(|e| AppError::Io(e))?;
+    let path = tempdir.path().join("no_such_dir").join("snippets.json");
+    let mut s = JsonFileStorage::open(&path)?;
         let sn = Snippet { name: "x".to_string(), content: "y".to_string(), created_at: chrono::Utc::now() };
         match s.add(sn) {
             Err(AppError::Io(_)) => Ok(()),
@@ -263,9 +292,9 @@ mod tests {
 
     #[test]
     fn test_sqlite_parse_error_on_bad_date() -> Result<(), AppError> {
-        let temp = tempfile::NamedTempFile::new().map_err(|e| AppError::Io(e))?;
-        let path = temp.path().to_string_lossy().to_string();
-        let conn = rusqlite::Connection::open(&path).map_err(|e| AppError::Sqlite(e))?;
+    let temp = tempfile::NamedTempFile::new().map_err(|e| AppError::Io(e))?;
+    let path = temp.path().to_path_buf();
+    let conn = rusqlite::Connection::open(&path).map_err(|e| AppError::Sqlite(e))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS snippets (
                 name TEXT PRIMARY KEY,
@@ -274,7 +303,7 @@ mod tests {
             );",
         ).map_err(|e| AppError::Sqlite(e))?;
         conn.execute("INSERT OR REPLACE INTO snippets (name, content, created_at) VALUES (?1, ?2, ?3)", rusqlite::params!["bad", "c", "not-a-date"]).map_err(|e| AppError::Sqlite(e))?;
-        let s = SqliteStorage::open(&path)?;
+    let s = SqliteStorage::open(&path)?;
         match s.get("bad") {
             Err(AppError::Parse(_)) => Ok(()),
             Ok(_) => panic!("expected parse error"),
