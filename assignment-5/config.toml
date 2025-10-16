@@ -1,0 +1,17 @@
+[mode]
+debug = false
+
+[server]
+external_url = "http://localhost"
+http_port = 8080
+grpc_port = 8083
+healthz_port = 10026
+metrics_port = 9200
+
+[log]
+level = "debug"
+
+[background]
+period = "10s"
+limit = 5
+lock_timeout = "3s"
