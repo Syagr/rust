@@ -1,6 +1,6 @@
-use predicates::prelude::*;
-use mockito::{mock, server_url};
 use assert_cmd::Command;
+use mockito::{mock, server_url};
+use predicates::prelude::*;
 use tempfile::NamedTempFile;
 
 #[test]
