@@ -23,9 +23,9 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -45,6 +45,12 @@ enum AppError {
 
     #[error("Invalid storage provider string, expected PROVIDER:PATH")]
     InvalidProvider,
+
+    #[error("Parse error: {0}")]
+    Parse(#[from] chrono::ParseError),
+
+    #[error("--download requires --name")] 
+    DownloadRequiresName,
 }
 
 /// Application-level error enum for snippets-app.
@@ -81,39 +87,32 @@ trait SnippetStorage {
 }
 
 struct JsonFileStorage {
-    path: String,
+    path: PathBuf,
     index: HashMap<String, Snippet>,
 }
 
 /// JSON file based storage. Keeps an in-memory index and persists to disk.
 impl JsonFileStorage {
-    fn open(path: impl Into<String>) -> Result<Self> {
-        let path = path.into();
-        if !Path::new(&path).exists() {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&path)?;
-            file.write_all(b"{}")?;
+    fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_owned();
+        let mut index = HashMap::new();
+        if path.exists() {
+            let meta = fs::metadata(&path)?;
+            if meta.len() > 0 {
+                let file = File::open(&path)?;
+                index = serde_json::from_reader(file)?;
+            }
         }
-        let data = fs::read_to_string(&path)?;
-        let index = if data.trim().is_empty() {
-            HashMap::new()
-        } else {
-            serde_json::from_str(&data).unwrap_or_default()
-        };
         Ok(JsonFileStorage { path, index })
     }
 
     fn persist(&self) -> Result<()> {
-        let data = serde_json::to_string_pretty(&self.index)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&self.path)?;
-        file.write_all(data.as_bytes())?;
+        serde_json::to_writer(&mut file, &self.index)?;
         Ok(())
     }
 }
@@ -144,7 +143,7 @@ struct SqliteStorage {
 
 /// SQLite-based storage using a simple `snippets` table.
 impl SqliteStorage {
-    fn open(path: impl AsRef<str>) -> Result<Self> {
+    fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = rusqlite::Connection::open(path.as_ref())?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS snippets (
@@ -180,8 +179,7 @@ impl SnippetStorage for SqliteStorage {
             let content: String = row.get(1)?;
             let created_at_str: String = row.get(2)?;
             let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
+                .map(|dt| dt.with_timezone(&Utc))?;
             Ok(Snippet {
                 name,
                 content,
@@ -227,17 +225,36 @@ fn run_app() -> Result<()> {
     let cli = Cli::parse();
     // initialize tracing/logging according to env vars
     init_tracing_from_env();
+    tracing::debug!(?cli.name, ?cli.read, ?cli.delete, ?cli.download, "parsed CLI");
     let mut storage = build_storage_from_env()?;
+
+    if cli.download.is_some() && cli.name.is_none() {
+        eprintln!("--download requires --name");
+        return Err(AppError::DownloadRequiresName);
+    }
 
     if let Some(name) = cli.name {
         let content = if let Some(url) = cli.download {
             // download content
+            tracing::info!(%url, %name, "downloading snippet");
             match reqwest::blocking::get(&url) {
-                Ok(resp) => resp
-                    .text()
-                    .map_err(|e| AppError::Io(std::io::Error::other(e)))?,
+                Ok(resp) => {
+                    if let Err(status_err) = resp.error_for_status_ref() {
+                        eprintln!("Download failed: {}", status_err);
+                        return Err(AppError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            status_err,
+                        )));
+                    }
+                    resp.text().map_err(|e| {
+                        AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?
+                }
                 Err(e) => {
-                    return Err(AppError::Io(std::io::Error::other(e)))
+                    return Err(AppError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e,
+                    )))
                 }
             }
         } else {
@@ -245,6 +262,7 @@ fn run_app() -> Result<()> {
             io::stdin().read_to_string(&mut s)?;
             s
         };
+        tracing::info!(%name, len = content.len(), "saving snippet");
         let snippet = Snippet {
             name: name.clone(),
             content: content.trim_end().to_string(),
@@ -259,6 +277,7 @@ fn run_app() -> Result<()> {
         match storage.get(&name) {
             Ok(snippet) => println!("{}", snippet.content),
             Err(AppError::NotFound) => {
+                tracing::warn!(%name, "snippet not found on read");
                 eprintln!("Snippet '{}' not found.", name);
                 return Err(AppError::NotFound);
             }
@@ -273,6 +292,7 @@ fn run_app() -> Result<()> {
         match storage.remove(&name) {
             Ok(()) => println!("Snippet '{}' deleted.", name),
             Err(AppError::NotFound) => {
+                tracing::warn!(%name, "snippet not found on delete");
                 eprintln!("Snippet '{}' not found.", name);
                 return Err(AppError::NotFound);
             }
