@@ -1,0 +1,5 @@
+setx FILES_INDEX_PATH "json:C:\tmp\files_index.json"
+$env:FILES_INDEX_PATH = "json:C:\tmp\files_index.json"
+
+cargo run --manifest-path lab3\cli\Cargo.toml -- add --path C:\Images\photo.jpg --tags cat,holiday
+cargo run --manifest-path lab3\cli\Cargo.toml -- get --tags cat
