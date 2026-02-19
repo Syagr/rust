@@ -1,0 +1,2 @@
+https://www.rust-lang.org/logos/rust-logo-512x512.png
+# Replace with a real local path on your machine, e.g. C:\Images\photo.jpg
