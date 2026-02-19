@@ -1,3 +1,8 @@
+//! Практична робота 3 — CLI
+//!
+//! Binary crate that provides a small CLI around the `files_index_core` library.
+#![deny(missing_docs, missing_crate_level_docs)]
+
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use std::env;
@@ -25,6 +30,7 @@ enum Commands {
     },
 }
 
+/// Parse comma-separated tags into a vector of trimmed tag strings.
 fn parse_tags(s: &str) -> Vec<String> {
     s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
 }

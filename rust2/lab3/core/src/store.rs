@@ -4,25 +4,49 @@ use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Errors produced by the core indexing library.
+///
+/// This enum is exported so callers can match on specific error cases
+/// (I/O, JSON parsing, SQLite errors, etc.).
 #[derive(Error, Debug)]
 pub enum CoreError {
+    /// Underlying I/O error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// JSON (de)serialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// SQLite-related error.
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    /// Configuration or argument error reported by the library.
     #[error("configuration error: {0}")]
     Config(String),
 }
 
+/// Result alias using `CoreError` for convenience.
 pub type Result<T> = std::result::Result<T, CoreError>;
 
+/// Trait describing an index storage backend.
+///
+/// Implementors provide methods to add a file with tags and to query files
+/// matching a set of tags.
 pub trait IndexStore {
+    /// Add a file path and associated tags to the index.
+    ///
+    /// This function should not panic; errors must be returned as `CoreError`.
     fn add(&self, path: &str, tags: &[String]) -> Result<()>;
+
+    /// Retrieve file paths that match *all* provided tags.
+    ///
+    /// An empty `tags` slice returns all indexed file paths.
     fn get(&self, tags: &[String]) -> Result<Vec<String>>;
 }
 
+/// JSON-backed index stored in a single file.
 #[derive(Clone)]
 pub struct JsonStore {
     path: PathBuf,
@@ -34,6 +58,7 @@ struct JsonIndex {
 }
 
 impl JsonStore {
+    /// Create a new `JsonStore` that will read/write the given file path.
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
         Self { path: path.into() }
     }
@@ -83,11 +108,15 @@ impl IndexStore for JsonStore {
     }
 }
 
+/// SQLite-backed index stored in a SQLite database file.
 pub struct SqliteStore {
     path: PathBuf,
 }
 
 impl SqliteStore {
+    /// Create or open the SQLite-backed store at the given path.
+    ///
+    /// Initializes the required tables on first run.
     pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self> {
         let path = path.into();
         let conn = rusqlite::Connection::open(&path)?;
