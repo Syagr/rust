@@ -1,0 +1,9 @@
+# Example commands (PowerShell)
+setx FILES_INDEX_PATH "json:C:\Users\me\.files_index.json"
+$env:FILES_INDEX_PATH = "json:C:\Users\me\.files_index.json"
+
+# add
+cargo run --manifest-path lab2\Cargo.toml -- add --path C:\Images\photo.jpg --tags cat,holiday
+
+# get
+cargo run --manifest-path lab2\Cargo.toml -- get --tags cat
