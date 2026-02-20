@@ -1,0 +1,16 @@
+[package]
+name = "lab5"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+walkdir = "2"
+aes-gcm = "0.10"
+aes = "0.8"
+rand = { version = "0.8", features = ["std"] }
+base64 = "0.21"
+rayon = "1.9"
+anyhow = "1.0"
+image = "0.24"
