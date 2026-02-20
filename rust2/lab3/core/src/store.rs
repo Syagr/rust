@@ -74,6 +74,11 @@ impl JsonStore {
 
     fn save(&self, idx: &JsonIndex) -> Result<()> {
         let s = serde_json::to_string_pretty(idx)?;
+        if let Some(parent) = self.path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
         fs::write(&self.path, s)?;
         Ok(())
     }

@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Add { path, tags } => {
             let t = parse_tags(&tags);
             store.add(&path, &t).map_err(|e| anyhow::anyhow!("add failed: {}", e))?;
-            println!("Added: {} with tags {}", path, t.join(","));
+            println!("Added: {} with tags {}", path, t.join(", "));
         }
         Commands::Get { tags } => {
             let t = parse_tags(&tags);
