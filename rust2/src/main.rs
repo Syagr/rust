@@ -1,59 +1,20 @@
-use std::fmt;
+use std::env;
 
-// New-type for OrderId to avoid mixing with plain integers
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OrderId(u64);
-
-impl fmt::Display for OrderId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "#{}", self.0)
-    }
-}
-
-// Each state is a distinct type — impossible to skip states at compile time
-struct NewOrder { id: OrderId }
-struct PaidOrder { id: OrderId }
-struct ShippedOrder { id: OrderId }
-
-impl NewOrder {
-    fn new(id: OrderId) -> Self { Self { id } }
-    fn pay(self) -> PaidOrder { PaidOrder { id: self.id } }
-}
-
-impl PaidOrder {
-    fn ship(self) -> ShippedOrder { ShippedOrder { id: self.id } }
-}
-
-impl fmt::Display for NewOrder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "NewOrder({})", self.id)
-    }
-}
-impl fmt::Display for PaidOrder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PaidOrder({})", self.id)
-    }
-}
-impl fmt::Display for ShippedOrder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ShippedOrder({})", self.id)
-    }
-}
+mod prakt2;
 
 fn main() {
-    // Create a new order with a typed OrderId
-    let id = OrderId(1001);
-    let order = NewOrder::new(id);
-    println!("Created: {}", order);
+    // If the first CLI arg is "lab2", dispatch to the lab2 CLI implementation.
+    let mut args: Vec<String> = env::args().collect();
+    if args.len() > 1 && args[1] == "prakt2" {
+        // remove the "prakt2" token and pass the rest to prakt2 parser
+        args.remove(1);
+        if let Err(e) = prakt2::run_from_args(args) {
+            eprintln!("prakt2 error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
-    // Pay the order — now we have a PaidOrder; cannot call `ship` on NewOrder
-    let order = order.pay();
-    println!("After pay: {}", order);
-
-    // Ship the order — now we have a ShippedOrder
-    let order = order.ship();
-    println!("After ship: {}", order);
-
-    // The compiler will prevent illegal transitions such as:
-    // let illegal = NewOrder::new(id).ship(); // error: no method `ship` on `NewOrder`
+    // Default demo when not running a lab: print a short help
+    println!("Run a lab via: cargo run --bin rust2 -- lab2 --help");
 }
