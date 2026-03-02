@@ -1,9 +1,0 @@
-[package]
-name = "lab3_cli"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-clap = { version = "4.2", features = ["derive"] }
-anyhow = "1.0"
-files_index_core = { path = "../core" }
