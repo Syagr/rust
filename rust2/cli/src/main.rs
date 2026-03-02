@@ -8,13 +8,30 @@
 )]
 
 use anyhow::{bail, Context, Result};
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::Aes256Gcm;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use clap::{Parser, Subcommand};
+use crossbeam_channel as channel;
 use files_index_core::{IndexStore, JsonStore, SqliteStore};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use rayon::prelude::*;
 use std::env;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::Duration;
+use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Files index CLI (Practical work 3)", long_about = None)]
+#[command(author, version, about = "Files index CLI (Practical work 5)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     cmd: Commands,
@@ -36,6 +53,24 @@ enum Commands {
         /// Comma-separated tags (use empty to list all)
         #[arg(long, default_value = "")]
         tags: String,
+    },
+    /// Generate matrices and compute sums in parallel
+    Matrix {
+        /// Matrix size N (N x N)
+        #[arg(long, default_value_t = 4096)]
+        size: usize,
+        /// Number of matrices to generate
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
+    /// Encrypt files in a directory using AES-256-GCM
+    Encrypt {
+        /// Directory to scan
+        #[arg(long)]
+        dir: PathBuf,
+        /// Base64-encoded 32-byte key (optional)
+        #[arg(long)]
+        key: Option<String>,
     },
 }
 
@@ -60,22 +95,182 @@ fn make_store_from_env() -> Result<Box<dyn IndexStore>> {
     }
 }
 
+fn run_matrix(size: usize, count: usize) -> Result<()> {
+    let (tx, rx) = channel::unbounded::<Arc<Vec<f32>>>();
+    let rx2 = rx.clone();
+
+    let consumer = |id: usize, rx: channel::Receiver<Arc<Vec<f32>>>| -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            while let Ok(mat) = rx.recv() {
+                let sum: f32 = mat.par_iter().sum();
+                println!("consumer {} sum: {}", id, sum);
+            }
+        })
+    };
+
+    let c1 = consumer(1, rx);
+    let c2 = consumer(2, rx2);
+
+    let tx_prod = tx.clone();
+    let producer = thread::spawn(move || {
+        for _ in 0..count {
+            let mut data = Vec::with_capacity(size * size);
+            for i in 0..(size * size) {
+                data.push(i as f32);
+            }
+            let shared = Arc::new(data);
+            if tx_prod.send(shared).is_err() {
+                break;
+            }
+        }
+    });
+
+    producer.join().ok();
+    drop(tx);
+    c1.join().ok();
+    c2.join().ok();
+
+    Ok(())
+}
+
+fn decode_or_generate_key(key_b64: Option<String>) -> Result<Vec<u8>> {
+    if let Some(k) = key_b64 {
+        let decoded = B64
+            .decode(k.trim())
+            .context("failed to decode base64 key")?;
+        if decoded.len() != 32 {
+            bail!("key must be 32 bytes (base64-encoded)");
+        }
+        return Ok(decoded);
+    }
+
+    let mut key = vec![0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    println!("Generated key (base64): {}", B64.encode(&key));
+    Ok(key)
+}
+
+fn encrypt_bytes(cipher: &Aes256Gcm, plaintext: &[u8]) -> Result<Vec<u8>> {
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+    let mut ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|_| anyhow::anyhow!("encryption failed"))?;
+    let mut out = Vec::with_capacity(12 + ciphertext.len());
+    out.extend_from_slice(&nonce_bytes);
+    out.append(&mut ciphertext);
+    Ok(out)
+}
+
+fn output_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    PathBuf::from(format!("{}.data", s))
+}
+
+fn run_encrypt(dir: PathBuf, key_b64: Option<String>) -> Result<()> {
+    let key = decode_or_generate_key(key_b64)?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).map_err(|_| anyhow::anyhow!("invalid key"))?;
+
+    let (tx, rx) = channel::unbounded::<(PathBuf, Vec<u8>)>();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+
+    let producer = {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("data") {
+                    continue;
+                }
+                match fs::read(path) {
+                    Ok(bytes) => {
+                        let _ = tx.send((path.to_path_buf(), bytes));
+                    }
+                    Err(_) => {
+                        continue;
+                    }
+                }
+            }
+        })
+    };
+
+    let mut consumers = Vec::new();
+    for _ in 0..3 {
+        let rx = rx.clone();
+        let cipher = cipher.clone();
+        let counter = Arc::clone(&counter);
+        consumers.push(thread::spawn(move || {
+            while let Ok((path, data)) = rx.recv() {
+                if let Ok(out) = encrypt_bytes(&cipher, &data) {
+                    let out_path = output_path(&path);
+                    if fs::write(&out_path, out).is_ok() {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        }));
+    }
+
+    let monitor = {
+        let counter = Arc::clone(&counter);
+        let done = Arc::clone(&done);
+        thread::spawn(move || {
+            let mut last = 0usize;
+            while !done.load(Ordering::SeqCst) {
+                let current = counter.load(Ordering::SeqCst);
+                if current != last {
+                    println!("processed files: {}", current);
+                    last = current;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+            let final_count = counter.load(Ordering::SeqCst);
+            if final_count != last {
+                println!("processed files: {}", final_count);
+            }
+        })
+    };
+
+    producer.join().ok();
+    drop(tx);
+    for h in consumers {
+        h.join().ok();
+    }
+    done.store(true, Ordering::SeqCst);
+    monitor.join().ok();
+
+    Ok(())
+}
+
 fn run_from_args(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
-    let store = make_store_from_env()?;
 
     match cli.cmd {
         Commands::Add { path, tags } => {
+            let store = make_store_from_env()?;
             let list = parse_tags(&tags);
             store.add(&path, &list)?;
             println!("Added: {} with tags {}", path, list.join(", "));
         }
         Commands::Get { tags } => {
+            let store = make_store_from_env()?;
             let list = parse_tags(&tags);
             let files = store.get(&list)?;
             for f in files {
                 println!("{}", f);
             }
+        }
+        Commands::Matrix { size, count } => {
+            run_matrix(size, count)?;
+        }
+        Commands::Encrypt { dir, key } => {
+            run_encrypt(dir, key)?;
         }
     }
 
