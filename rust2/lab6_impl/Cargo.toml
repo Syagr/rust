@@ -8,3 +8,5 @@ num_cpus = "*"
 
 [profile.release]
 opt-level = 3
+
+[workspace]
