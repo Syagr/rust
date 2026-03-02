@@ -1,44 +1,15 @@
-# Інтеграція — вибір: GitHub Issues
+# GitHub Issues Integration
 
-Ми інтегруємо GitHub Issues у проект — це природний вибір якщо репозиторій розміщений на GitHub.
+We use GitHub Issues as the bug tracking system for this project.
 
-Переваги інтеграції через GitHub:
-- Тісна інтеграція з Pull Requests та commits.
-- Можливість автоматичного закриття issue через текст в описі PR (`Fixes #123`).
-- Доступний REST API та `gh` CLI для автоматизації.
-- Projects / Actions / Discussions у тій же платформі.
+## Configuration
+- Issue template: `.github/ISSUE_TEMPLATE/bug_report.md`
+- PR template: `.github/PULL_REQUEST_TEMPLATE.md`
+- Triage workflow: `.github/workflows/issue-triage.yml`
 
-Швидкий план інтеграції (локально/на сервері):
-
-1) Підготуйте репозиторій і увійдіть через `gh` (GitHub CLI):
-
-```powershell
-gh auth login
-```
-
-2) Створити issue з CLI (приклад):
-
-```powershell
-gh issue create --title "Bug: incorrect tag formatting" --body "CLI prints tags without spaces. Severity: minor" --label bug --assignee @me
-```
-
-3) Зв'язати PR з issue (коли створите PR):
-
-- У повідомленні PR напишіть `Fixes #<issue-number>` — після злиття issue закриється автоматично.
-
-4) Автоматизація: можна додати GitHub Actions для автоматичного створення issues з шаблонів або triage:
-
-- Додайте `.github/workflows/issue-triage.yml` для автоматичного присвоєння лейблів за ключовими словами (опціонально).
-
-Примітка: я не маю доступу до вашого облікового запису GitHub, тому нижче у `issues/` збережено приклади баг-репортів у Markdown, які ви можете скопіювати і створити як реальні Issues через веб/CLI.
-
-Команди для створення issue з файлу (CLI):
-
-```powershell
-# створити issue з локального markdown файлу
-gh issue create --title "$(head -n1 issues/bug-001.md)" --body-file issues/bug-001.md --label bug --assignee @me
-```
-
----
-
-Далі `issues/` містить приклади баг-репортів, а `fixes/` — посилання на зміни в коді, що їх виправляють.
+## Workflow
+1. Create an issue with a short summary, steps to reproduce, expected/actual behavior.
+2. Add or let the triage workflow add labels (bug, priority:high/medium/low, etc.).
+3. Fix the issue on a feature branch.
+4. In the PR description, reference the issue with `Fixes #<id>` to auto-close it.
+5. Link the PR or commit in the issue before closing.
