@@ -1,0 +1,53 @@
+name: Issue triage
+
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Label issues based on content
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const title = context.payload.issue.title || '';
+            const body = context.payload.issue.body || '';
+            const text = (title + '\n' + body).toLowerCase();
+            const labels = new Set();
+
+            if (text.includes('bug') || text.includes('error') || text.includes('panic') || text.includes('fail')) {
+              labels.add('bug');
+            }
+            if (text.includes('feature') || text.includes('enhancement') || text.includes('request')) {
+              labels.add('enhancement');
+            }
+            if (text.includes('doc') || text.includes('documentation')) {
+              labels.add('documentation');
+            }
+            if (text.includes('priority: high') || text.includes('priority:high') || text.includes('severity: critical')) {
+              labels.add('priority:high');
+            } else if (text.includes('priority: medium') || text.includes('priority:medium')) {
+              labels.add('priority:medium');
+            } else if (text.includes('priority: low') || text.includes('priority:low')) {
+              labels.add('priority:low');
+            }
+
+            if (labels.size === 0) {
+              // fallback: give a "triage" label so maintainers can review
+              labels.add('triage');
+            }
+
+            const labelsArray = Array.from(labels);
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: labelsArray,
+            });
+
+            core.info(`Added labels: ${labelsArray.join(', ')}`);
