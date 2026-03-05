@@ -20,6 +20,7 @@ use rand::RngCore;
 use rayon::prelude::*;
 use std::env;
 use std::fs;
+use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
@@ -28,6 +29,7 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use walkdir::WalkDir;
 use std::{cell::{Cell, RefCell}, rc::Rc};
 
@@ -87,6 +89,9 @@ enum Commands {
         /// Number of worker threads for threaded mode
         #[arg(long, default_value_t = 4)]
         workers: usize,
+        /// Optional URL for async network request per image
+        #[arg(long)]
+        fetch_url: Option<String>,
     },
     /// Analyze std types for Send/Sync behavior
     AnalyzeSync,
@@ -297,69 +302,116 @@ fn resized_output_path(input: &Path, out_dir: &Path) -> PathBuf {
     out_dir.join(format!("resized_{}", name))
 }
 
-fn process_one_image(path: &Path, out_dir: &Path, width: u32) -> Result<()> {
-    let img = image::open(path).with_context(|| format!("failed to decode {}", path.display()))?;
-    let src_w = img.width();
-    let src_h = img.height();
-    let height = if src_w == 0 {
-        1
-    } else {
-        ((src_h as u64 * width as u64) / src_w as u64).max(1) as u32
-    };
-    let resized = img.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
-    let out = resized_output_path(path, out_dir);
-    resized
-        .save(&out)
-        .with_context(|| format!("failed to encode {}", out.display()))?;
+async fn decode_resize_encode(bytes: Vec<u8>, width: u32) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let img = image::load_from_memory(&bytes).context("failed to decode image")?;
+        let src_w = img.width();
+        let src_h = img.height();
+        let height = if src_w == 0 {
+            1
+        } else {
+            ((src_h as u64 * width as u64) / src_w as u64).max(1) as u32
+        };
+        let resized = img.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+        let mut out = Vec::new();
+        resized
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .context("failed to encode image")?;
+        Ok(out)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("blocking worker panicked"))?
+}
+
+async fn process_one_image_async(
+    path: PathBuf,
+    out_dir: PathBuf,
+    width: u32,
+    client: reqwest::Client,
+    fetch_url: Option<String>,
+) -> Result<()> {
+    let bytes = tokio::fs::read(&path)
+        .await
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    if let Some(url) = fetch_url {
+        let req_result = client.get(url).send().await;
+        if let Ok(resp) = req_result {
+            let _ = resp.error_for_status();
+        } else if let Err(e) = req_result {
+            eprintln!("warning: network request failed: {}", e);
+        }
+    }
+
+    let out_bytes = decode_resize_encode(bytes, width).await?;
+    let out_path = resized_output_path(&path, &out_dir);
+    tokio::fs::write(&out_path, out_bytes)
+        .await
+        .with_context(|| format!("failed to write {}", out_path.display()))?;
     Ok(())
 }
 
-fn run_process_images(dir: PathBuf, out: PathBuf, width: u32, workers: usize) -> Result<()> {
+async fn run_process_images(
+    dir: PathBuf,
+    out: PathBuf,
+    width: u32,
+    workers: usize,
+    fetch_url: Option<String>,
+) -> Result<()> {
     if workers == 0 {
         bail!("workers must be >= 1");
     }
-    fs::create_dir_all(&out)
+    tokio::fs::create_dir_all(&out)
+        .await
         .with_context(|| format!("failed to create output dir {}", out.display()))?;
     let out_single = out.join("single");
     let out_threaded = out.join("threaded");
-    fs::create_dir_all(&out_single)
+    tokio::fs::create_dir_all(&out_single)
+        .await
         .with_context(|| format!("failed to create output dir {}", out_single.display()))?;
-    fs::create_dir_all(&out_threaded)
+    tokio::fs::create_dir_all(&out_threaded)
+        .await
         .with_context(|| format!("failed to create output dir {}", out_threaded.display()))?;
 
-    let files = collect_image_files(&dir);
+    let files = tokio::task::spawn_blocking(move || collect_image_files(&dir))
+        .await
+        .map_err(|_| anyhow::anyhow!("file scan worker panicked"))?;
     if files.is_empty() {
-        println!("No image files found in {}", dir.display());
+        println!("No image files found");
         return Ok(());
     }
 
+    let client = reqwest::Client::new();
     let start_single = Instant::now();
     for path in &files {
-        process_one_image(path, &out_single, width)?;
+        process_one_image_async(
+            path.clone(),
+            out_single.clone(),
+            width,
+            client.clone(),
+            fetch_url.clone(),
+        )
+        .await?;
     }
     let dur_single = start_single.elapsed();
 
     let start_threaded = Instant::now();
-    let (tx, rx) = channel::unbounded::<PathBuf>();
-    let mut handles = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let rx = rx.clone();
+    let sem = Arc::new(Semaphore::new(workers));
+    let mut handles = Vec::with_capacity(files.len());
+    for path in &files {
+        let permit = sem.clone().acquire_owned().await?;
+        let path = path.clone();
         let out_dir = out_threaded.clone();
-        handles.push(thread::spawn(move || -> Result<()> {
-            while let Ok(path) = rx.recv() {
-                process_one_image(&path, &out_dir, width)?;
-            }
-            Ok(())
+        let client = client.clone();
+        let fetch_url = fetch_url.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+            process_one_image_async(path, out_dir, width, client, fetch_url).await
         }));
     }
-    for path in &files {
-        tx.send(path.clone())
-            .with_context(|| format!("failed to send task for {}", path.display()))?;
-    }
-    drop(tx);
     for h in handles {
-        h.join()
-            .map_err(|_| anyhow::anyhow!("worker thread panicked"))??;
+        h.await
+            .map_err(|_| anyhow::anyhow!("async task panicked"))??;
     }
     let dur_threaded = start_threaded.elapsed();
 
@@ -407,7 +459,7 @@ fn run_analyze_sync() -> Result<()> {
     Ok(())
 }
 
-fn run_from_args(argv: Vec<String>) -> Result<()> {
+async fn run_from_args(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
 
     match cli.cmd {
@@ -436,8 +488,9 @@ fn run_from_args(argv: Vec<String>) -> Result<()> {
             out,
             width,
             workers,
+            fetch_url,
         } => {
-            run_process_images(dir, out, width, workers)?;
+            run_process_images(dir, out, width, workers, fetch_url).await?;
         }
         Commands::AnalyzeSync => {
             run_analyze_sync()?;
@@ -447,9 +500,10 @@ fn run_from_args(argv: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn main() {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
     let args: Vec<String> = env::args().collect();
-    if let Err(e) = run_from_args(args) {
+    if let Err(e) = run_from_args(args).await {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }

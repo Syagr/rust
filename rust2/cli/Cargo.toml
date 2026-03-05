@@ -14,3 +14,5 @@ aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
 image = "0.25"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
