@@ -68,7 +68,7 @@ fn run_from_args(argv: Vec<String>) -> Result<()> {
         Commands::Add { path, tags } => {
             let list = parse_tags(&tags);
             store.add(&path, &list)?;
-            println!("Added: {} with tags {}", path, list.join(","));
+            println!("Added: {} with tags {}", path, list.join(", "));
         }
         Commands::Get { tags } => {
             let list = parse_tags(&tags);
