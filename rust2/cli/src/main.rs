@@ -29,6 +29,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
+use std::{cell::{Cell, RefCell}, rc::Rc};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Files index CLI (Practical work 5)", long_about = None)]
@@ -87,6 +88,8 @@ enum Commands {
         #[arg(long, default_value_t = 4)]
         workers: usize,
     },
+    /// Analyze std types for Send/Sync behavior
+    AnalyzeSync,
 }
 
 fn parse_tags(s: &str) -> Vec<String> {
@@ -375,6 +378,35 @@ fn run_process_images(dir: PathBuf, out: PathBuf, width: u32, workers: usize) ->
     Ok(())
 }
 
+fn assert_send<T: Send>() {}
+fn assert_sync<T: Sync>() {}
+
+fn run_analyze_sync() -> Result<()> {
+    // Positive compile-time checks.
+    assert_send::<String>();
+    assert_sync::<String>();
+    assert_send::<std::sync::Arc<String>>();
+    assert_sync::<std::sync::Arc<String>>();
+
+    // These std types are intentionally not checked with assert_send/assert_sync
+    // because they do NOT satisfy those traits:
+    // - Rc<T>: !Send and !Sync
+    // - Cell<T>: !Sync
+    // - RefCell<T>: !Sync
+    let _rc_example: Rc<i32> = Rc::new(10);
+    let _cell_example: Cell<i32> = Cell::new(1);
+    let _ref_cell_example: RefCell<i32> = RefCell::new(5);
+
+    println!("Send/Sync analysis (std types):");
+    println!("1) Rc<T>: !Send, !Sync (non-atomic refcount)");
+    println!("2) Cell<T>: Send (depends on T), !Sync (interior mutability without sync)");
+    println!("3) RefCell<T>: Send (depends on T), !Sync (runtime borrow rules are not thread-safe)");
+    println!("4) Mutex<T>/Arc<T>: common thread-safe primitives for shared access");
+    println!("5) Send = move value across threads; Sync = share &T across threads");
+
+    Ok(())
+}
+
 fn run_from_args(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
 
@@ -406,6 +438,9 @@ fn run_from_args(argv: Vec<String>) -> Result<()> {
             workers,
         } => {
             run_process_images(dir, out, width, workers)?;
+        }
+        Commands::AnalyzeSync => {
+            run_analyze_sync()?;
         }
     }
 
