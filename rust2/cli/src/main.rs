@@ -18,15 +18,18 @@ use files_index_core::{IndexStore, JsonStore, SqliteStore};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use rayon::prelude::*;
+use std::future::Future;
 use std::env;
 use std::fs;
 use std::io::Cursor;
+use std::pin::Pin;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+use std::task::{Context as TaskContext, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -36,6 +39,15 @@ use std::{cell::{Cell, RefCell}, rc::Rc};
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Files index CLI (Practical work 5)", long_about = None)]
 struct Cli {
+    /// Number of Tokio worker threads (default: CPU core count)
+    #[arg(long, global = true)]
+    rt_workers: Option<usize>,
+    /// Maximum threads in Tokio blocking pool
+    #[arg(long, global = true)]
+    max_blocking: Option<usize>,
+    /// Name prefix for Tokio runtime threads
+    #[arg(long, global = true)]
+    thread_name: Option<String>,
     #[command(subcommand)]
     cmd: Commands,
 }
@@ -95,6 +107,92 @@ enum Commands {
     },
     /// Analyze std types for Send/Sync behavior
     AnalyzeSync,
+    /// Manual Future demo: timer + measurable wrapper
+    FutureDemo {
+        /// Delay in milliseconds for TimerFuture
+        #[arg(long, default_value_t = 250)]
+        millis: u64,
+    },
+}
+
+struct MeasurableFuture<Fut> {
+    inner_future: Fut,
+    started_at: Option<Instant>,
+}
+
+impl<Fut> MeasurableFuture<Fut> {
+    fn new(inner_future: Fut) -> Self {
+        Self {
+            inner_future,
+            started_at: None,
+        }
+    }
+}
+
+impl<Fut> Future for MeasurableFuture<Fut>
+where
+    Fut: Future,
+{
+    type Output = Fut::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        if this.started_at.is_none() {
+            this.started_at = Some(Instant::now());
+        }
+        let inner = unsafe { Pin::new_unchecked(&mut this.inner_future) };
+        match inner.poll(cx) {
+            Poll::Ready(out) => {
+                if let Some(start) = this.started_at.take() {
+                    println!("MeasurableFuture elapsed: {:?}", start.elapsed());
+                }
+                Poll::Ready(out)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+struct TimerFuture {
+    shared: Arc<std::sync::Mutex<TimerState>>,
+}
+
+struct TimerState {
+    completed: bool,
+    waker: Option<Waker>,
+}
+
+impl TimerFuture {
+    fn new(millis: u64) -> Self {
+        let state = Arc::new(std::sync::Mutex::new(TimerState {
+            completed: false,
+            waker: None,
+        }));
+        let thread_state = Arc::clone(&state);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(millis));
+            let mut st = thread_state.lock().unwrap();
+            st.completed = true;
+            if let Some(w) = st.waker.take() {
+                w.wake();
+            }
+        });
+        Self { shared: state }
+    }
+}
+
+impl Future for TimerFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        let mut st = self.shared.lock().unwrap();
+        if st.completed {
+            Poll::Ready(())
+        } else {
+            st.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
 }
 
 fn parse_tags(s: &str) -> Vec<String> {
@@ -459,9 +557,15 @@ fn run_analyze_sync() -> Result<()> {
     Ok(())
 }
 
-async fn run_from_args(argv: Vec<String>) -> Result<()> {
-    let cli = Cli::parse_from(argv);
+async fn run_future_demo(millis: u64) -> Result<()> {
+    let timer = TimerFuture::new(millis);
+    let measurable = MeasurableFuture::new(timer);
+    measurable.await;
+    println!("TimerFuture completed after ~{} ms", millis);
+    Ok(())
+}
 
+async fn run_cli(cli: Cli) -> Result<()> {
     match cli.cmd {
         Commands::Add { path, tags } => {
             let store = make_store_from_env()?;
@@ -495,15 +599,39 @@ async fn run_from_args(argv: Vec<String>) -> Result<()> {
         Commands::AnalyzeSync => {
             run_analyze_sync()?;
         }
+        Commands::FutureDemo { millis } => {
+            run_future_demo(millis).await?;
+        }
     }
 
     Ok(())
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
-    let args: Vec<String> = env::args().collect();
-    if let Err(e) = run_from_args(args).await {
+fn main() {
+    let cli = Cli::parse();
+    let workers = cli.rt_workers.unwrap_or_else(num_cpus::get);
+    let max_blocking = cli.max_blocking.unwrap_or(512);
+    let thread_name = cli
+        .thread_name
+        .clone()
+        .unwrap_or_else(|| "files-index-worker".to_string());
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
+        .worker_threads(workers)
+        .max_blocking_threads(max_blocking)
+        .thread_name(thread_name)
+        .enable_all();
+
+    let runtime = match builder.build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Error: failed to build tokio runtime: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = runtime.block_on(run_cli(cli)) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
