@@ -1,6 +1,6 @@
-# Practical Work 4
+# Laboratory Work 4
 
-This folder contains the materials for Practical Work 4: comparison of bug tracking systems and integration into the project.
+This folder contains materials for Laboratory Work 4: integrating a bug tracking system into the project.
 
 ## Contents
 - `integration.md`: how GitHub Issues is integrated for this project.
