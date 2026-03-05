@@ -27,7 +27,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -71,6 +71,21 @@ enum Commands {
         /// Base64-encoded 32-byte key (optional)
         #[arg(long)]
         key: Option<String>,
+    },
+    /// Decode, resize and re-encode images in single and multi-thread modes
+    ProcessImages {
+        /// Input directory with source images (recursive)
+        #[arg(long)]
+        dir: PathBuf,
+        /// Output directory for processed images
+        #[arg(long)]
+        out: PathBuf,
+        /// Target width
+        #[arg(long, default_value_t = 800)]
+        width: u32,
+        /// Number of worker threads for threaded mode
+        #[arg(long, default_value_t = 4)]
+        workers: usize,
     },
 }
 
@@ -248,6 +263,118 @@ fn run_encrypt(dir: PathBuf, key_b64: Option<String>) -> Result<()> {
     Ok(())
 }
 
+fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("jpg") | Some("jpeg") | Some("png") | Some("bmp") | Some("gif") | Some("webp")
+    )
+}
+
+fn collect_image_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            let p = entry.path();
+            if is_image_path(p) {
+                files.push(p.to_path_buf());
+            }
+        }
+    }
+    files
+}
+
+fn resized_output_path(input: &Path, out_dir: &Path) -> PathBuf {
+    let name = input
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image");
+    out_dir.join(format!("resized_{}", name))
+}
+
+fn process_one_image(path: &Path, out_dir: &Path, width: u32) -> Result<()> {
+    let img = image::open(path).with_context(|| format!("failed to decode {}", path.display()))?;
+    let src_w = img.width();
+    let src_h = img.height();
+    let height = if src_w == 0 {
+        1
+    } else {
+        ((src_h as u64 * width as u64) / src_w as u64).max(1) as u32
+    };
+    let resized = img.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+    let out = resized_output_path(path, out_dir);
+    resized
+        .save(&out)
+        .with_context(|| format!("failed to encode {}", out.display()))?;
+    Ok(())
+}
+
+fn run_process_images(dir: PathBuf, out: PathBuf, width: u32, workers: usize) -> Result<()> {
+    if workers == 0 {
+        bail!("workers must be >= 1");
+    }
+    fs::create_dir_all(&out)
+        .with_context(|| format!("failed to create output dir {}", out.display()))?;
+    let out_single = out.join("single");
+    let out_threaded = out.join("threaded");
+    fs::create_dir_all(&out_single)
+        .with_context(|| format!("failed to create output dir {}", out_single.display()))?;
+    fs::create_dir_all(&out_threaded)
+        .with_context(|| format!("failed to create output dir {}", out_threaded.display()))?;
+
+    let files = collect_image_files(&dir);
+    if files.is_empty() {
+        println!("No image files found in {}", dir.display());
+        return Ok(());
+    }
+
+    let start_single = Instant::now();
+    for path in &files {
+        process_one_image(path, &out_single, width)?;
+    }
+    let dur_single = start_single.elapsed();
+
+    let start_threaded = Instant::now();
+    let (tx, rx) = channel::unbounded::<PathBuf>();
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let rx = rx.clone();
+        let out_dir = out_threaded.clone();
+        handles.push(thread::spawn(move || -> Result<()> {
+            while let Ok(path) = rx.recv() {
+                process_one_image(&path, &out_dir, width)?;
+            }
+            Ok(())
+        }));
+    }
+    for path in &files {
+        tx.send(path.clone())
+            .with_context(|| format!("failed to send task for {}", path.display()))?;
+    }
+    drop(tx);
+    for h in handles {
+        h.join()
+            .map_err(|_| anyhow::anyhow!("worker thread panicked"))??;
+    }
+    let dur_threaded = start_threaded.elapsed();
+
+    let single_ms = dur_single.as_secs_f64() * 1000.0;
+    let threaded_ms = dur_threaded.as_secs_f64() * 1000.0;
+    let delta_pct = if single_ms > 0.0 {
+        ((threaded_ms - single_ms) / single_ms) * 100.0
+    } else {
+        0.0
+    };
+
+    println!("single-threaded:  {:.2} ms", single_ms);
+    println!("multi-threaded:   {:.2} ms", threaded_ms);
+    println!("delta (%):        {:.2}", delta_pct);
+
+    Ok(())
+}
+
 fn run_from_args(argv: Vec<String>) -> Result<()> {
     let cli = Cli::parse_from(argv);
 
@@ -271,6 +398,14 @@ fn run_from_args(argv: Vec<String>) -> Result<()> {
         }
         Commands::Encrypt { dir, key } => {
             run_encrypt(dir, key)?;
+        }
+        Commands::ProcessImages {
+            dir,
+            out,
+            width,
+            workers,
+        } => {
+            run_process_images(dir, out, width, workers)?;
         }
     }
 
