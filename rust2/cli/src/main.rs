@@ -1,4 +1,11 @@
-#![warn(clippy::missing_errors_doc, clippy::result_large_err)]
+//! CLI for indexing files by tags.
+#![deny(
+    missing_docs,
+    rustdoc::missing_crate_level_docs,
+    clippy::missing_panics_doc,
+    clippy::missing_errors_doc,
+    clippy::result_large_err
+)]
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};

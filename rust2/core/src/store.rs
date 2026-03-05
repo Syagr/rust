@@ -10,15 +10,22 @@ pub trait IndexStore {
     ///
     /// # Errors
     /// Returns an error if the store backend fails to write data.
+    ///
+    /// # Panics
+    /// Does not panic.
     fn add(&self, path: &str, tags: &[String]) -> Result<()>;
 
     /// Get files matching all provided tags.
     ///
     /// # Errors
     /// Returns an error if the store backend fails to read data.
+    ///
+    /// # Panics
+    /// Does not panic.
     fn get(&self, tags: &[String]) -> Result<Vec<String>>;
 }
 
+/// JSON file-based store implementation.
 #[derive(Clone)]
 pub struct JsonStore {
     path: PathBuf,
@@ -31,6 +38,9 @@ struct JsonIndex {
 
 impl JsonStore {
     /// Create a JSON store at the provided path.
+    ///
+    /// # Panics
+    /// Does not panic.
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
         Self { path: path.into() }
     }
@@ -82,6 +92,7 @@ impl IndexStore for JsonStore {
     }
 }
 
+/// SQLite store implementation.
 pub struct SqliteStore {
     path: PathBuf,
 }
@@ -91,6 +102,9 @@ impl SqliteStore {
     ///
     /// # Errors
     /// Returns an error if the database cannot be opened or initialized.
+    ///
+    /// # Panics
+    /// Does not panic.
     pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self> {
         let path = path.into();
         let conn = rusqlite::Connection::open(&path)?;
