@@ -22,7 +22,6 @@ use std::future::Future;
 use std::env;
 use std::fs;
 use std::io::Cursor;
-use std::pin::Pin;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
@@ -557,13 +556,8 @@ fn run_analyze_sync() -> Result<()> {
     Ok(())
 }
 
-async fn run_future_demo(millis: u64) -> Result<()> {
-    let timer = TimerFuture::new(millis);
-    let measurable = MeasurableFuture::new(timer);
-    measurable.await;
-    println!("TimerFuture completed after ~{} ms", millis);
-    Ok(())
-}
+async fn run_from_args(argv: Vec<String>) -> Result<()> {
+    let cli = Cli::parse_from(argv);
 
 async fn run_cli(cli: Cli) -> Result<()> {
     match cli.cmd {
@@ -607,31 +601,10 @@ async fn run_cli(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn main() {
-    let cli = Cli::parse();
-    let workers = cli.rt_workers.unwrap_or_else(num_cpus::get);
-    let max_blocking = cli.max_blocking.unwrap_or(512);
-    let thread_name = cli
-        .thread_name
-        .clone()
-        .unwrap_or_else(|| "files-index-worker".to_string());
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder
-        .worker_threads(workers)
-        .max_blocking_threads(max_blocking)
-        .thread_name(thread_name)
-        .enable_all();
-
-    let runtime = match builder.build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("Error: failed to build tokio runtime: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    if let Err(e) = runtime.block_on(run_cli(cli)) {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
+    let args: Vec<String> = env::args().collect();
+    if let Err(e) = run_from_args(args).await {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
