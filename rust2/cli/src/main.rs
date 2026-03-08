@@ -38,13 +38,13 @@ use std::{cell::{Cell, RefCell}, rc::Rc};
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Files index CLI (Practical work 5)", long_about = None)]
 struct Cli {
-    /// Number of Tokio worker threads (default: CPU core count)
+    /// Number of runtime worker threads (default: number of CPU cores)
     #[arg(long, global = true)]
     rt_workers: Option<usize>,
-    /// Maximum threads in Tokio blocking pool
+    /// Maximum number of threads in Tokio blocking pool
     #[arg(long, global = true)]
     max_blocking: Option<usize>,
-    /// Name prefix for Tokio runtime threads
+    /// Runtime worker thread name prefix
     #[arg(long, global = true)]
     thread_name: Option<String>,
     #[command(subcommand)]
@@ -556,9 +556,6 @@ fn run_analyze_sync() -> Result<()> {
     Ok(())
 }
 
-async fn run_from_args(argv: Vec<String>) -> Result<()> {
-    let cli = Cli::parse_from(argv);
-
 async fn run_cli(cli: Cli) -> Result<()> {
     match cli.cmd {
         Commands::Add { path, tags } => {
@@ -601,10 +598,30 @@ async fn run_cli(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
-    let args: Vec<String> = env::args().collect();
-    if let Err(e) = run_from_args(args).await {
+fn main() {
+    let cli = Cli::parse();
+    let workers = cli.rt_workers.unwrap_or_else(num_cpus::get);
+    let max_blocking = cli.max_blocking.unwrap_or(512);
+    let thread_name = cli
+        .thread_name
+        .clone()
+        .unwrap_or_else(|| "files-index-worker".to_string());
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
+        .worker_threads(workers)
+        .max_blocking_threads(max_blocking)
+        .thread_name(thread_name)
+        .enable_all();
+    let runtime = match builder.build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Error: failed to build tokio runtime: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = runtime.block_on(run_cli(cli)) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
