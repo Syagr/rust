@@ -1,22 +1,23 @@
-use anyhow::Result;
-use aes_gcm::{Aes256Gcm, Nonce, KeyInit};
 use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use clap::{Parser, Subcommand};
+use rand::{rngs::OsRng, RngCore};
 use rayon::prelude::*;
-use rand::{RngCore, rngs::OsRng};
-use walkdir::WalkDir;
+// walkdir was used earlier for blocking traversal; now using async `tokio::fs::read_dir`
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::path::{PathBuf, Path};
-use std::time::Instant;
 use std::thread;
+use std::time::Instant;
 // stdfs removed (unused)
-use image::imageops::FilterType;
-use image::{ImageBuffer, Rgba, DynamicImage, ImageOutputFormat};
-use std::io::Cursor;
 use futures::stream::{self, StreamExt};
-use tokio::task::spawn_blocking;
+use image::imageops::FilterType;
+use image::{DynamicImage, ImageBuffer, ImageOutputFormat, Rgba};
+use std::io::Cursor;
 use tokio::fs;
+use tokio::task::spawn_blocking;
+// tokio::io not needed directly here
 
 #[derive(Parser)]
 #[command(name = "lab5")]
@@ -79,9 +80,15 @@ fn main() -> Result<()> {
     let default_workers = num_cpus::get();
     let workers = cli.rt_workers.unwrap_or(default_workers);
     let max_blocking = cli.max_blocking.unwrap_or(512);
-    let thread_name = cli.thread_name.clone().unwrap_or_else(|| "lab5-worker".to_string());
+    let thread_name = cli
+        .thread_name
+        .clone()
+        .unwrap_or_else(|| "lab5-worker".to_string());
 
-    println!("Starting tokio runtime: workers={}, max_blocking={}, thread_name={}", workers, max_blocking, thread_name);
+    println!(
+        "Starting tokio runtime: workers={}, max_blocking={}, thread_name={}",
+        workers, max_blocking, thread_name
+    );
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(workers);
@@ -99,7 +106,12 @@ fn main() -> Result<()> {
             Commands::Encrypt { dir, key } => {
                 run_encrypt_async(PathBuf::from(dir), key).await?;
             }
-            Commands::ProcessImages { dir, out, width, workers } => {
+            Commands::ProcessImages {
+                dir,
+                out,
+                width,
+                workers,
+            } => {
                 process_images_async(dir, out, width, workers).await?;
             }
             Commands::GenImages { out, count } => {
@@ -133,14 +145,13 @@ fn run_matrix(size: usize, count: usize) -> Result<()> {
         for i in 0..count {
             eprintln!("producer: generating matrix {}/{}", i + 1, count);
             let n = size.checked_mul(size).expect("size too large");
-            let mut v = Vec::with_capacity(n);
-            for _ in 0..n { v.push(1.0f32); }
-
+            let v = vec![1.0f32; n];
             let arc = Arc::new(v);
             let _ = s1.send(arc.clone());
             let _ = s2.send(arc);
         }
-        drop(s1); drop(s2);
+        drop(s1);
+        drop(s2);
         eprintln!("producer: finished");
     });
 
@@ -152,15 +163,8 @@ fn run_matrix(size: usize, count: usize) -> Result<()> {
 }
 
 async fn run_encrypt_async(dir: PathBuf, key_opt: Option<String>) -> Result<()> {
-    // collect files (blocking traversal)
-    let files: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
-        let mut v = Vec::new();
-        for entry in WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
-            let p = entry.path();
-            if p.is_file() { v.push(p.to_path_buf()); }
-        }
-        v
-    }).await?;
+    // collect files asynchronously
+    let files = collect_files_async(dir.clone()).await?;
 
     // Prepare key
     let key_bytes = if let Some(kb64) = key_opt {
@@ -172,56 +176,88 @@ async fn run_encrypt_async(dir: PathBuf, key_opt: Option<String>) -> Result<()> 
         println!("Generated key (base64): {}", printed);
         k
     };
-    if key_bytes.len() != 32 { anyhow::bail!("key must be 32 bytes (base64-decoded)"); }
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-    // Async-read files with limited concurrency
-    let read_futs = stream::iter(files.into_iter()).map(|p| async move {
-        let bytes = fs::read(&p).await;
-        (p, bytes)
-    }).buffer_unordered(16);
-
-    let mut reads: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-    tokio::pin!(read_futs);
-    while let Some((path, res)) = read_futs.next().await {
-        match res {
-            Ok(b) => reads.push((path, b)),
-            Err(e) => eprintln!("read {} failed: {}", path.display(), e),
-        }
+    if key_bytes.len() != 32 {
+        anyhow::bail!("key must be 32 bytes (base64-decoded)");
     }
+    let cipher =
+        Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    // Encrypt in blocking pool (CPU-bound)
-    let mut enc_tasks = Vec::new();
-    for (path, bytes) in reads {
-        let cipher = cipher.clone();
-        enc_tasks.push(tokio::task::spawn_blocking(move || -> Result<(PathBuf, Vec<u8>)> {
-            let mut nonce_bytes = [0u8; 12];
-            OsRng.fill_bytes(&mut nonce_bytes);
-            let nonce = Nonce::from_slice(&nonce_bytes);
-            let ct = cipher.encrypt(nonce, bytes.as_ref()).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            let mut out = Vec::new();
-            out.extend_from_slice(&nonce_bytes);
-            out.extend_from_slice(&ct);
-            let mut out_path = path.with_extension("");
-            out_path.set_file_name(format!("{}.data", path.file_name().and_then(|n| n.to_str()).unwrap_or("out")));
-            Ok((out_path, out))
-        }));
-    }
-
-    for t in enc_tasks {
-        match t.await {
-            Ok(Ok((out_path, out_bytes))) => {
-                if let Err(e) = fs::write(&out_path, &out_bytes).await {
-                    eprintln!("write {} failed: {}", out_path.display(), e);
+    // Stream pipeline: read -> encrypt (spawn_blocking) -> write; limit concurrency
+    let concurrency = 16usize;
+    stream::iter(files)
+        .map(|path| {
+            let cipher = cipher.clone();
+            async move {
+                match fs::read(&path).await {
+                    Ok(bytes) => {
+                        // encrypt on blocking pool
+                        match spawn_blocking(move || -> Result<(PathBuf, Vec<u8>)> {
+                            let mut nonce_bytes = [0u8; 12];
+                            OsRng.fill_bytes(&mut nonce_bytes);
+                            let nonce = Nonce::from_slice(&nonce_bytes);
+                            let ct = cipher
+                                .encrypt(nonce, bytes.as_ref())
+                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                            let mut out = Vec::new();
+                            out.extend_from_slice(&nonce_bytes);
+                            out.extend_from_slice(&ct);
+                            let mut out_path = path.with_extension("");
+                            out_path.set_file_name(format!(
+                                "{}.data",
+                                path.file_name().and_then(|n| n.to_str()).unwrap_or("out")
+                            ));
+                            Ok((out_path, out))
+                        })
+                        .await
+                        {
+                            Ok(Ok((out_path, out_bytes))) => {
+                                if let Err(e) = fs::write(&out_path, &out_bytes).await {
+                                    Err(anyhow::anyhow!(e.to_string()))
+                                } else {
+                                    Ok(())
+                                }
+                            }
+                            Ok(Err(e)) => Err(e),
+                            Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                        }
+                    }
+                    Err(e) => Err(anyhow::anyhow!(e.to_string())),
                 }
             }
-            Ok(Err(e)) => eprintln!("encryption error: {}", e),
-            Err(e) => eprintln!("spawn blocking join error: {}", e),
-        }
-    }
+        })
+        .buffer_unordered(concurrency)
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                eprintln!("encrypt pipeline error: {}", e);
+            }
+        })
+        .await;
 
     println!("Encryption finished");
     Ok(())
+}
+
+async fn collect_files_async(dir: PathBuf) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut dirs = vec![dir];
+    while let Some(d) = dirs.pop() {
+        let mut rd = match fs::read_dir(&d).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("read_dir {} failed: {}", d.display(), e);
+                continue;
+            }
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let path = entry.path();
+            match entry.file_type().await {
+                Ok(ft) if ft.is_file() => files.push(path),
+                Ok(ft) if ft.is_dir() => dirs.push(path),
+                _ => {}
+            }
+        }
+    }
+    Ok(files)
 }
 
 async fn process_images_async(dir: String, out: String, width: u32, workers: usize) -> Result<()> {
@@ -229,23 +265,23 @@ async fn process_images_async(dir: String, out: String, width: u32, workers: usi
     let outdir = Path::new(&out).to_path_buf();
     fs::create_dir_all(&outdir).await.ok();
 
-    // collect image files (blocking traversal)
-    let files: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
-        let mut v = Vec::new();
-        for entry in WalkDir::new(&indir).into_iter().filter_map(|e| e.ok()) {
-            let p = entry.path();
-            if p.is_file() {
-                if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                    let ext_l = ext.to_ascii_lowercase();
-                    if ["jpg","jpeg","png","bmp","tiff","webp"].contains(&ext_l.as_str()) { v.push(p.to_path_buf()); }
-                }
-            }
+    // collect image files asynchronously
+    let mut files = collect_files_async(indir).await?;
+    // filter by extension
+    files.retain(|p| {
+        if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "bmp" | "tiff" | "webp"
+            )
+        } else {
+            false
         }
-        v
-    }).await?;
+    });
 
     println!("Found {} image files", files.len());
 
+    // single-threaded run for baseline
     let start_single = Instant::now();
     for p in &files {
         if let Err(e) = process_image_file(p.clone(), outdir.clone(), width).await {
@@ -255,20 +291,26 @@ async fn process_images_async(dir: String, out: String, width: u32, workers: usi
     let dur_single = start_single.elapsed();
     println!("Single-threaded duration: {:.3}s", dur_single.as_secs_f64());
 
+    // parallel run using futures stream with buffer_unordered
     let start_threaded = Instant::now();
-    let sem = Arc::new(tokio::sync::Semaphore::new(workers));
-    let mut tasks = Vec::new();
-    for p in files {
-        let permit = sem.clone().acquire_owned().await.unwrap();
-        let outdir = outdir.clone();
-        tasks.push(tokio::spawn(async move {
-            let _permit = permit;
-            let _ = process_image_file(p, outdir, width).await;
-        }));
-    }
-    for t in tasks { let _ = t.await; }
+    stream::iter(files)
+        .map(|p| {
+            let outdir = outdir.clone();
+            async move {
+                if let Err(e) = process_image_file(p, outdir, width).await {
+                    eprintln!("parallel: failed: {}", e);
+                }
+            }
+        })
+        .buffer_unordered(workers)
+        .for_each(|_| async {})
+        .await;
     let dur_threaded = start_threaded.elapsed();
-    println!("Threaded duration ({} workers): {:.3}s", workers, dur_threaded.as_secs_f64());
+    println!(
+        "Threaded duration ({} workers): {:.3}s",
+        workers,
+        dur_threaded.as_secs_f64()
+    );
 
     Ok(())
 }
@@ -285,7 +327,8 @@ async fn gen_images_async(out: String, count: usize) -> Result<()> {
             let mut buf = Vec::new();
             dynimg.write_to(&mut Cursor::new(&mut buf), ImageOutputFormat::Png)?;
             Ok(buf)
-        }).await??;
+        })
+        .await??;
         fs::write(&outpath, &buf).await?;
     }
 
@@ -300,10 +343,18 @@ async fn process_image_file(path: PathBuf, outdir: PathBuf, width: u32) -> Resul
         let h = (img.height() as f32 * (width as f32 / img.width() as f32)) as u32;
         let resized = img.resize(width, h, FilterType::Lanczos3);
         let mut buf = Vec::new();
-        resized.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageOutputFormat::Jpeg(80))?;
-        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("out").to_string();
+        resized.write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageOutputFormat::Jpeg(80),
+        )?;
+        let fname = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("out")
+            .to_string();
         Ok((fname, buf))
-    }).await?;
+    })
+    .await?;
     let (fname, out_bytes) = res?;
     let outpath = outdir.join(format!("{}_processed.jpg", fname));
     fs::write(&outpath, &out_bytes).await?;
