@@ -22,6 +22,18 @@ use tokio::fs;
 #[command(name = "lab5")]
 #[command(about = "Лабораторна робота 5: Потоки, канали та шифрування (async refactor)", long_about = None)]
 struct Cli {
+    /// Number of tokio worker threads to use for the runtime (overrides default)
+    #[arg(long, global = true)]
+    rt_workers: Option<usize>,
+
+    /// Maximum number of blocking threads in tokio's blocking pool
+    #[arg(long, global = true)]
+    max_blocking: Option<usize>,
+
+    /// Thread name prefix for runtime worker threads
+    #[arg(long, global = true)]
+    thread_name: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -60,26 +72,42 @@ enum Commands {
     },
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Matrix { size, count } => {
-            spawn_blocking(move || run_matrix(size, count)).await??;
-        }
-        Commands::Encrypt { dir, key } => {
-            run_encrypt_async(PathBuf::from(dir), key).await?;
-        }
-        Commands::ProcessImages { dir, out, width, workers } => {
-            process_images_async(dir, out, width, workers).await?;
-        }
-        Commands::GenImages { out, count } => {
-            gen_images_async(out, count).await?;
-        }
-    }
+    // build runtime manually so we can experiment with different configs
+    let default_workers = num_cpus::get();
+    let workers = cli.rt_workers.unwrap_or(default_workers);
+    let max_blocking = cli.max_blocking.unwrap_or(512);
+    let thread_name = cli.thread_name.clone().unwrap_or_else(|| "lab5-worker".to_string());
 
-    Ok(())
+    println!("Starting tokio runtime: workers={}, max_blocking={}, thread_name={}", workers, max_blocking, thread_name);
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(workers);
+    builder.max_blocking_threads(max_blocking);
+    builder.thread_name(thread_name.as_str());
+    builder.enable_all();
+
+    let rt = builder.build().expect("failed to build runtime");
+
+    rt.block_on(async move {
+        match cli.command {
+            Commands::Matrix { size, count } => {
+                spawn_blocking(move || run_matrix(size, count)).await??;
+            }
+            Commands::Encrypt { dir, key } => {
+                run_encrypt_async(PathBuf::from(dir), key).await?;
+            }
+            Commands::ProcessImages { dir, out, width, workers } => {
+                process_images_async(dir, out, width, workers).await?;
+            }
+            Commands::GenImages { out, count } => {
+                gen_images_async(out, count).await?;
+            }
+        }
+        Ok(())
+    })
 }
 
 fn run_matrix(size: usize, count: usize) -> Result<()> {
